@@ -4,6 +4,7 @@
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 CYAN='\033[0;36m'
+YELLOW='\033[1;33m'
 BOLD='\033[1m'
 RESET='\033[0m'
 
@@ -14,6 +15,17 @@ check_status() {
     else
         echo -e "${RED}${BOLD}Error:${RESET} $2"
         exit 1
+    fi
+}
+
+# Function to backup existing files
+backup_file() {
+    local file="$1"
+    if [ -e "$file" ]; then
+        local backup="${file}.backup.$(date +%Y%m%d_%H%M%S)"
+        echo -e "${YELLOW}${BOLD}Backing up existing file: ${file} to ${backup}${RESET}"
+        mv "$file" "$backup"
+        check_status "Backup created successfully." "Failed to create backup of ${file}"
     fi
 }
 
@@ -65,6 +77,53 @@ check_bluetooth() {
     fi
 }
 
+# Function to safely clone a repository
+safe_clone() {
+    local repo="$1"
+    local dir="$2"
+    
+    if [ -d "$dir" ]; then
+        echo -e "${YELLOW}${BOLD}Directory ${dir} already exists.${RESET}"
+        read -rp "$(echo -e "${CYAN}${BOLD}Do you want to remove and clone again? (yes/no):${RESET} ")" choice
+        if [[ $choice =~ ^[Yy](es)?$ ]]; then
+            rm -rf "$dir"
+            git clone "$repo" "$dir"
+            check_status "Repository cloned successfully." "Failed to clone repository."
+        else
+            echo -e "${GREEN}${BOLD}Skipping clone of ${repo}${RESET}"
+        fi
+    else
+        git clone "$repo" "$dir"
+        check_status "Repository cloned successfully." "Failed to clone repository."
+    fi
+}
+
+# Function to safely copy files/directories
+safe_copy() {
+    local src="$1"
+    local dest="$2"
+    
+    if [ ! -e "$src" ]; then
+        echo -e "${RED}${BOLD}Error: Source ${src} does not exist.${RESET}"
+        return 1
+    fi
+    
+    if [ -e "$dest" ]; then
+        echo -e "${YELLOW}${BOLD}${dest} already exists.${RESET}"
+        read -rp "$(echo -e "${CYAN}${BOLD}Do you want to backup and replace? (yes/no):${RESET} ")" choice
+        if [[ $choice =~ ^[Yy](es)?$ ]]; then
+            backup_file "$dest"
+            cp -r "$src" "$dest"
+            check_status "Files copied successfully." "Failed to copy files."
+        else
+            echo -e "${GREEN}${BOLD}Skipping copy of ${src}${RESET}"
+        fi
+    else
+        cp -r "$src" "$dest"
+        check_status "Files copied successfully." "Failed to copy files."
+    fi
+}
+
 # Warning message
 echo -e "${RED}${BOLD}WARNING:${RESET}Don't blindly run this script without knowing what it entails! This script is going to make changes on your system, before proceeding further, make sure you already backup up your current system."
 echo -e "${CYAN}${BOLD}Please read and understand the script before proceeding.${RESET}"
@@ -79,13 +138,9 @@ check_pacman
 
 # Check if yay or paru is already installed
 if check_aur_helper; then
-    # Determine which AUR helper is installed
     aur_helper=$(command -v yay || command -v paru)
 else
-    # AUR helper options
     aur_helpers=("yay" "paru")
-
-    # Prompt user to choose AUR helper (default is yay)
     echo -e "${BOLD}Choose AUR helper (default is yay):${RESET}"
     select aur_helper in "${aur_helpers[@]}"; do
         case $aur_helper in
@@ -98,16 +153,16 @@ else
         esac
     done
 
-    # Set default AUR helper to yay
     aur_helper=${aur_helper:-yay}
-
-    # Install the AUR helper
-    sudo pacman -S --needed git base-devel
-    git clone https://aur.archlinux.org/$aur_helper.git
-    cd $aur_helper
-    makepkg -si
-    cd ..
-    check_status "$aur_helper is installed. Proceeding further..." "Failed to install $aur_helper."
+    
+    if [ ! -d "$aur_helper" ]; then
+        sudo pacman -S --needed git base-devel
+        safe_clone "https://aur.archlinux.org/$aur_helper.git" "$aur_helper"
+        cd $aur_helper || exit 1
+        makepkg -si
+        cd ..
+        check_status "$aur_helper is installed. Proceeding further..." "Failed to install $aur_helper."
+    fi
 fi
 
 # Check and enable NetworkManager
@@ -126,21 +181,19 @@ $aur_helper -S --noconfirm zsh
 # Change the default shell to Zsh
 echo -e "${GREEN}${BOLD}Changing default shell to Zsh...${RESET}"
 chsh -s /bin/zsh
-touch ~/.zshrc
+
+# Backup existing .zshrc if it exists
+backup_file "$HOME/.zshrc"
+touch "$HOME/.zshrc"
 
 # Install Zsh plugins
 ZSH_PLUGIN_DIR="$HOME/.local/share/zsh-plugins"
 echo -e "${GREEN}${BOLD}Installing Zsh plugins: zsh-syntax-highlighting, zsh-autosuggestions, supercharge...${RESET}"
 mkdir -p "$ZSH_PLUGIN_DIR"
 
-git clone https://github.com/zsh-users/zsh-syntax-highlighting.git "$ZSH_PLUGIN_DIR/zsh-syntax-highlighting"
-check_status "zsh-syntax-highlighting installed." "Failed to install zsh-syntax-highlighting."
-
-git clone https://github.com/zsh-users/zsh-autosuggestions.git "$ZSH_PLUGIN_DIR/zsh-autosuggestions"
-check_status "zsh-autosuggestions installed." "Failed to install zsh-autosuggestions."
-
-git clone https://github.com/zap-zsh/supercharge.git "$ZSH_PLUGIN_DIR/supercharge"
-check_status "supercharge installed." "Failed to install supercharge."
+safe_clone "https://github.com/zsh-users/zsh-syntax-highlighting.git" "$ZSH_PLUGIN_DIR/zsh-syntax-highlighting"
+safe_clone "https://github.com/zsh-users/zsh-autosuggestions.git" "$ZSH_PLUGIN_DIR/zsh-autosuggestions"
+safe_clone "https://github.com/zap-zsh/supercharge.git" "$ZSH_PLUGIN_DIR/supercharge"
 
 # List of packages to install
 packages=(
@@ -207,21 +260,29 @@ xdg-user-dirs-update
 
 # Install eww widgets
 echo -e "${GREEN}${BOLD}Installing eww widgets...${RESET}"
-git clone https://github.com/elkowar/eww
-cd eww
-cargo build --release --no-default-features --features=wayland
-check_status "Eww build successful." "Failed to build Eww."
-cd target/release
-chmod +x ./eww
-mkdir -p $HOME/.local/bin
-cp eww $HOME/.local/bin
-cd $HOME
-echo -e "${GREEN}${BOLD}Eww widgets installed successfully.${RESET}"
+if [ ! -d "eww" ]; then
+    safe_clone "https://github.com/elkowar/eww" "eww"
+    cd eww || exit 1
+    cargo build --release --no-default-features --features=wayland
+    check_status "Eww build successful." "Failed to build Eww."
+    
+    mkdir -p "$HOME/.local/bin"
+    if [ -f "target/release/eww" ]; then
+        chmod +x ./target/release/eww
+        safe_copy "./target/release/eww" "$HOME/.local/bin/eww"
+    fi
+    cd "$HOME" || exit 1
+    echo -e "${GREEN}${BOLD}Eww widgets installed successfully.${RESET}"
+else
+    echo -e "${YELLOW}${BOLD}Eww directory already exists. Skipping installation.${RESET}"
+fi
 
-git clone https://github/com/d-shubh./HyprNest.git
-cd HyprNest
-cp -r .config/* $HOME/.config/
-cp -r Pictures $HOME
-cp .zshrc $HOME
+# Clone and copy HyprNest configurations
+safe_clone "https://github.com/d-shubh/HyprNest.git" "HyprNest"
+cd HyprNest || exit 1
+safe_copy ".config" "$HOME/.config"
+safe_copy "Pictures" "$HOME/Pictures"
+safe_copy ".zshrc" "$HOME/.zshrc"
+cd "$HOME" || exit 1
 
 echo -e "${GREEN}${BOLD}Installation complete :-)\n Please reboot your system. ${RESET}"
